@@ -1,9 +1,8 @@
 // Copyright (c) 2024 Massachusetts Institute of Technology
 // SPDX-License-Identifier: MIT
 import { SparqlResultsJsonType } from "types/sparql";
-
 import { ChatAPI } from "./ChatAPI";
-import { getEntityDataFromQuery } from "./knowledgeBase/getEntityData";
+import { formatSparqlResultsAsString } from "./formatSparqlResultsAsString";
 
 export type SummarizeOutcomeType = {
   data: SparqlResultsJsonType,
@@ -11,60 +10,52 @@ export type SummarizeOutcomeType = {
   error: Error,
 }
 
-/**
- * This function prompts the LLM to name the query and summarize the results
- * @param ChatAPI  the LLM API
- * @param query    the query that was executed
- * @param data     the data if applicable
- * @param error    the data if applicable, undefined if there was an error executing the query
- * @returns        a Promise that returns the name and summary as a key-value object
- */
-export async function summarizeQueryResults(chatAPI: ChatAPI, query:string, outcome:SummarizeOutcomeType):Promise<{name:string,summary:string}> {
-  const entityData = await getEntityDataFromQuery(query)
-
-  //first ask the LLM to come up with a name for the query
-  //this is useful for the query history feature
-  const {content:name} = await chatAPI.sendMessages([
+export async function summarizeQueryResults(
+  chatAPI: ChatAPI, 
+  query: string, 
+  outcome: SummarizeOutcomeType
+): Promise<string> {
+  if (!('data' in outcome)) {
+    throw new Error("Cannot summarize error result");
+  }
+  
+  const resultsAsString = formatSparqlResultsAsString(outcome.data);
+  
+  // First send a system message to guide the summarization
+  await chatAPI.sendMessages([
     {
-      content: `Here is a KG query:
-${query}
-
-Where the IDs in the query are:
-${entityData?.map(({id,label,description}) => `ID ${id} | Label: ${label} | Description: ${description}`).join("\n")}
-
-Respond with a brief name for this query.`,
       role: "system",
-      stage: "Query Summarization",
+      content: `You are an expert in Cypher queries and Neo4j graph databases. When summarizing query results:
+1. Analyze the query structure to understand what data is being requested
+2. Examine the results carefully and identify key patterns and insights
+3. Provide a clear, concise explanation of what the results show
+4. Highlight any interesting relationships or patterns in the data
+5. If the results are empty, suggest potential reasons why
+6. Use simple language that a non-technical user can understand
+`,
+      stage: "Query Summarization"
     }
-  ])
+  ]);
+  
+  // Then send the user message with the query and results
+  const response = await chatAPI.sendMessages([
+    {
+      role: "user",
+      content: `I executed the following Cypher query in Neo4j:
 
-  //if there was data, then the query executed successfully
-  if("data" in outcome) {
-    const {content:summary} = await chatAPI.sendMessages([
-      {
-        content: `These are the JSON results from the last query:
-${JSON.stringify(outcome.data, undefined, 2)}
+\`\`\`cypher
+${query}
+\`\`\`
 
-Respond with a brief summary of the results.`,
-        role: "system",
-        stage: "Query Summarization",
-      }
-    ])
-    return {name, summary}
-  }
-  //else if there was an error
-  else {
-    //ask the LLM to summarize the results
-    const {content:summary} = await chatAPI.sendMessages([
-      {
-        content: `The query did not execute successfully and had this error:.
-${outcome.error}
+And got these results:
 
-Respond with a brief guess as to why the query failed.`,
-        role: "system",
-        stage: "Query Summarization",
-      }
-    ])
-    return {name, summary}
-  }
+${resultsAsString}
+
+Please provide a clear, concise summary of what these results show. Explain any patterns or insights that might be relevant.`,
+      stage: "Query Summarization"
+    }
+  ]);
+  
+  // Use the updated response format
+  return response.content;
 }

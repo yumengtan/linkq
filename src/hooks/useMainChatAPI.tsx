@@ -6,11 +6,7 @@ import { useChatAPIInstance } from "./useChatAPIInstance";
 import { INITIAL_SYSTEM_MESSAGE } from "utils/knowledgeBase/prompts";
 
 //create a context to let any component use the main chatAPI
-export const MainChatAPIContext = createContext<ChatAPI>(new ChatAPI({
-  apiKey:"",
-  chatId: 0,
-  dangerouslyAllowBrowser: true,
-}));
+export const MainChatAPIContext = createContext<ChatAPI | null>(null);
 
 export function MainChatAPIProvider({
   children,
@@ -30,5 +26,9 @@ export function MainChatAPIProvider({
 }
 
 export function useMainChatAPI() {
-  return useContext(MainChatAPIContext)
+  const context = useContext(MainChatAPIContext)
+  if (!context) {
+    throw new Error('useMainChatAPI must be used within a MainChatAPIProvider')
+  }
+  return context
 }

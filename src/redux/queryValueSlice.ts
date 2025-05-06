@@ -13,11 +13,11 @@ import { DEMO_QUERY, IS_DEMO_MODE } from 'utils/demoData'
 // }`
 
 const initialState: {
-  queryValue: string,
+  value: string,
 } = {
   //state for the query in the editor
   // queryValue: GET_GOOGLE_FOUNDERS_AND_BIRTHDAYS, // use this for google founder start for the UI
-  queryValue: IS_DEMO_MODE ? DEMO_QUERY : "", // use this for a blank editor
+  value: IS_DEMO_MODE ? DEMO_QUERY : "", // use this for a blank editor
 }
 
 const queryValueSlice = createSlice({
@@ -26,7 +26,7 @@ const queryValueSlice = createSlice({
   reducers: {
     // Use the PayloadAction type to declare the contents of `action.payload`
     setQueryValue: (state, action: PayloadAction<string>) => {
-      state.queryValue = action.payload
+      state.value = action.payload
     }
   }
 })

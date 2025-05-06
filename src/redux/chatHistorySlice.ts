@@ -6,12 +6,12 @@ import { LinkQStageType } from 'types/linkQ'
 
 import { DEMO_FULL_HISTORY, DEMO_SIMPLE_HISTORY, IS_DEMO_MODE } from 'utils/demoData'
 
-export type LinkQChatMessageType = ChatCompletionMessageParam & {
-  content:string
-  chatId: number
-  name: string
-  stage: LinkQStageType,
-}
+export type LinkQChatMessageType = Omit<ChatCompletionMessageParam, 'content'> & {
+  content: string;  // Explicitly require content to be a string
+  chatId: number;
+  name: string;
+  stage: LinkQStageType;
+};
 
 const initialState: {
   chatIdCounter: number,

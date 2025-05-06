@@ -1,166 +1,249 @@
 // Copyright (c) 2024 Massachusetts Institute of Technology
 // SPDX-License-Identifier: MIT
-import { fuzzySearchEntitiesResponse } from "./knowledgeBase/fuzzySearch"
-import { getPropertiesForEntityResponse } from "./knowledgeBase/getPropertiesForEntity"
-import { findTailEntitiesResponse } from "./knowledgeBase/findTailEntities"
-import { ChatAPI } from "./ChatAPI"
-import { 
-  ENTITY_SEARCH_PREFIX, 
-  INITIAL_QUERY_BUILDING_SYSTEM_MESSAGE, 
-  KG_NAME, 
-  PROPERTIES_SEARCH_PREFIX, 
-  QUERY_BUILDING_SYSTEM_MESSAGE,
-  TAIL_SEARCH_PREFIX
-} from "./knowledgeBase/prompts"
+import { ChatAPI } from './ChatAPI'
+import { runCypherQuery } from './neo4j/runCypherQuery'
+import { LinkQStageType } from '../types/linkQ'
 
+interface IntermediateChatMessageType {
+  content: string;
+  role: "system" | "user" | "assistant";
+  stage: LinkQStageType;
+}
 
-const QUERY_BUILDING_MAX_LOOPS = 20 //HARDCODED we don't want the LLM looping forever
+const QUERY_BUILDING_MAX_LOOPS = 20;
+const ENTITY_SEARCH_PREFIX = "Entity Search:";
+const PROPERTIES_SEARCH_PREFIX = "Properties Search:";
+const TAIL_SEARCH_PREFIX = "Tail Search:";
+const KG_NAME = "Neo4j Knowledge Graph";
 
-export async function queryBuildingWorkflow(chatAPI:ChatAPI, text: string) {
-  //send the initial query building message to the LLM as the system role
+const INITIAL_QUERY_BUILDING_SYSTEM_MESSAGE = `You are an AI assistant that helps construct Cypher queries for a Neo4j knowledge graph.
+
+The knowledge graph contains documents that have been processed into chunks and entities.
+Schema:
+- (Document) nodes represent uploaded documents
+- (Chunk) nodes represent pieces of those documents
+- (__Entity__) nodes represent entities extracted from the documents
+- Relationships: 
+  - (Chunk)-[:PART_OF]->(Document)
+  - (__Entity__)-[:MENTIONED_IN]->(Chunk)
+  - (__Entity__)-[:RELATED_TO]->(__Entity__)
+
+To build queries, you can:
+1. Search for entities: "Entity Search: <search term>"
+2. Search for properties of an entity: "Properties Search: <entity_id>"
+3. Find entities related to another entity: "Tail Search: <entity_id>, <relationship_type>"
+
+When you're ready to stop searching and construct the query, respond with "STOP".
+`;
+
+const QUERY_BUILDING_SYSTEM_MESSAGE = `Now construct a Cypher query that answers the user's question using the entity and relationship IDs you've found. The query should be syntactically correct Neo4j Cypher.`;
+
+export async function queryBuildingWorkflow(chatAPI: ChatAPI, text: string) {
+  // Send initial query building message to the LLM as the system role
   let llmResponse = await chatAPI.sendMessages([
     {
       content: INITIAL_QUERY_BUILDING_SYSTEM_MESSAGE,
       role: "system",
       stage: "Query Building",
-    },
-  ])
+    } as IntermediateChatMessageType,
+  ]);
 
-  /* Main Query Building Loop */
-  //in this while loop, we let the LLM interface with the KG
-  //and traverse the graph to find the necessary entity and property IDs
-  let NO_FOREVER_LOOP = 0 //this counter tracks how many loop iterations we've run
-  while(NO_FOREVER_LOOP < QUERY_BUILDING_MAX_LOOPS) { //don't loop forever
-    NO_FOREVER_LOOP++ //increment our loop counter
+  let NO_FOREVER_LOOP = 0;
+  while (NO_FOREVER_LOOP < QUERY_BUILDING_MAX_LOOPS) {
+    NO_FOREVER_LOOP++;
     
-    const responseText = llmResponse.content.trim() //trim the LLM response
-    if(responseText.toUpperCase() === "STOP") { //if the LLM responded with stop
-      break //break out of the while loop
+    const responseText = llmResponse.content.trim();
+    if (responseText.toUpperCase() === "STOP") {
+      break;
     }
-    //else if the LLM wants to fuzzy search for entities
-    else if(responseText.includes(ENTITY_SEARCH_PREFIX)) {
-      llmResponse = await handleFuzzySearchForEntity( //run the entity search function
+    // Handle entity search
+    else if (responseText.includes(ENTITY_SEARCH_PREFIX)) {
+      llmResponse = await handleEntitySearch(
         chatAPI,
         responseText.split(ENTITY_SEARCH_PREFIX)[1].trim(),
-      )
+      );
     }
-    //else if the LLM wants to search for all the properties for an entity
-    else if(responseText.includes(PROPERTIES_SEARCH_PREFIX)) {
-      llmResponse = await handleGetPropertiesForEntity( //run the property search function
+    // Handle properties search
+    else if (responseText.includes(PROPERTIES_SEARCH_PREFIX)) {
+      llmResponse = await handlePropertiesSearch(
         chatAPI,
         responseText.split(PROPERTIES_SEARCH_PREFIX)[1].trim(),
-      )
+      );
     }
-    //else if the LLM wants to traverse the graph to find all tail entities
-    //that are connected to this head entity via a relation
-    else if(responseText.startsWith(TAIL_SEARCH_PREFIX)) {
-      llmResponse = await handleFindTailEntities(
+    // Handle tail search
+    else if (responseText.startsWith(TAIL_SEARCH_PREFIX)) {
+      llmResponse = await handleRelatedEntitiesSearch(
         chatAPI,
-        responseText.replace(TAIL_SEARCH_PREFIX,"").trim(),
-      )
+        responseText.replace(TAIL_SEARCH_PREFIX, "").trim(),
+      );
     }
-    //else the LLM didn't give us an expected response
+    // Invalid response
     else {
       llmResponse = await chatAPI.sendMessages([
         {
           content: `That was an invalid response. If you are done, just respond with STOP. Follow the specified format. ${INITIAL_QUERY_BUILDING_SYSTEM_MESSAGE}`,
           role: "system",
           stage: "Query Building",
-        }
-      ])
+        } as IntermediateChatMessageType,
+      ]);
     }
   }
-  //now the LLM should have found all the IDs it needs
   
-  //ask the LLM to generate a query
+  // Ask the LLM to generate a query
   return await chatAPI.sendMessages([
     {
       content: QUERY_BUILDING_SYSTEM_MESSAGE + ` Now construct a query that answers the user's question: ${text}`,
       role: "system",
       stage: "Query Building",
-    }
-  ])
+    } as IntermediateChatMessageType,
+  ]);
 }
 
+async function handleEntitySearch(chatAPI: ChatAPI, searchTerm: string) {
+  try {
+    // Search for entities using CONTAINS for fuzzy matching
+    const result = await runCypherQuery(`
+      MATCH (e:__Entity__)
+      WHERE e.id CONTAINS $searchTerm OR e.description CONTAINS $searchTerm
+      RETURN e.id AS entityId, e.description AS description
+      LIMIT 5
+    `, { searchTerm });
 
-async function handleFuzzySearchForEntity(chatAPI:ChatAPI, text:string) {
-  //try to resolve these entities by requesting data from the KG
-  const responseText = await fuzzySearchEntitiesResponse(text)
+    if (result.records.length === 0) {
+      return await chatAPI.sendMessages([
+        {
+          content: `${KG_NAME} did not find any entities matching "${searchTerm}". You may need to rephrase or simplify your entity search`,
+          role: "system",
+          stage: "Entity Fuzzy Searching",
+        } as IntermediateChatMessageType,
+      ]);
+    }
 
-  if(!responseText) {
+    const entitiesText = result.records
+      .map(record => {
+        const entityId = record.get('entityId');
+        const description = record.get('description');
+        return `${entityId}: ${description || 'No description'}`;
+      })
+      .join('\n');
+
     return await chatAPI.sendMessages([
       {
-        content: `${KG_NAME} did not resolve any entities. You may need to rephrase or simplify your entity search`,
+        content: `Found entities in ${KG_NAME}:\n${entitiesText}`,
         role: "system",
         stage: "Entity Fuzzy Searching",
-      }
-    ])
-  }
- 
-  return await chatAPI.sendMessages([
-    {
-      content: responseText,
-      role: "system",
-      stage: "Entity Fuzzy Searching",
-    }
-  ])
-}
-
-async function handleGetPropertiesForEntity(chatAPI:ChatAPI, entityId: string) {
-  const responseText = await getPropertiesForEntityResponse(entityId)
-
-  if(!responseText) {
+      } as IntermediateChatMessageType,
+    ]);
+  } catch (error) {
+    console.error('Error in entity search:', error);
     return await chatAPI.sendMessages([
       {
-        content: `${KG_NAME} did not resolve any properties for that entity. Are you sure that entity exists?`,
+        content: `Error searching for entities: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        role: "system",
+        stage: "Entity Fuzzy Searching",
+      } as IntermediateChatMessageType,
+    ]);
+  }
+}
+
+async function handlePropertiesSearch(chatAPI: ChatAPI, entityId: string) {
+  try {
+    // Get properties for an entity
+    const result = await runCypherQuery(`
+      MATCH (e:__Entity__ {id: $entityId})
+      RETURN properties(e) AS properties
+      LIMIT 1
+    `, { entityId });
+
+    if (result.records.length === 0) {
+      return await chatAPI.sendMessages([
+        {
+          content: `${KG_NAME} did not find any entity with ID "${entityId}". Are you sure that entity exists?`,
+          role: "system",
+          stage: "Property Search",
+        } as IntermediateChatMessageType,
+      ]);
+    }
+
+    const properties = result.records[0].get('properties');
+    const propertiesText = Object.entries(properties)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join('\n');
+
+    return await chatAPI.sendMessages([
+      {
+        content: `Properties for entity ${entityId}:\n${propertiesText}`,
         role: "system",
         stage: "Property Search",
-      }
-    ])
+      } as IntermediateChatMessageType,
+    ]);
+  } catch (error) {
+    console.error('Error in properties search:', error);
+    return await chatAPI.sendMessages([
+      {
+        content: `Error getting properties for entity: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        role: "system",
+        stage: "Property Search",
+      } as IntermediateChatMessageType,
+    ]);
   }
-
-  return await chatAPI.sendMessages([
-    {
-      content: responseText,
-      role: "system",
-      stage: "Property Search",
-    }
-  ])
 }
 
-async function handleFindTailEntities(chatAPI:ChatAPI, text: string) {
-  let split = text.split(" ")
-  if(split.length !== 2) {
-    split = text.split(", ")
-  }
-  if(split.length !== 2) {
+async function handleRelatedEntitiesSearch(chatAPI: ChatAPI, text: string) {
+  const split = text.split(",");
+  if (split.length !== 2) {
     return await chatAPI.sendMessages([
       {
-        content: "Your response did not follow the correct format. Please try again.",
+        content: "Your response did not follow the correct format. Please provide: Entity ID, Relationship Type",
         role: "system",
         stage: "Tail Search",
-      }
-    ])
+      } as IntermediateChatMessageType,
+    ]);
   }
 
-  const [entityId, propertyId] = split
-  const responseText = await findTailEntitiesResponse(entityId, propertyId)
+  const [entityId, relationshipType] = split.map(s => s.trim());
 
-  if(!responseText) {
-    return await chatAPI.sendMessages([
-      {
-        content: `${KG_NAME} did not resolve any entities for that entity and property. Are you sure that entity has that property?`,
-        role: "system",
-        stage: "Tail Search",
-      }
-    ])
-  }
+  try {
+    // Find related entities
+    const result = await runCypherQuery(`
+      MATCH (e1:__Entity__ {id: $entityId})-[r:${relationshipType}]->(e2:__Entity__)
+      RETURN e2.id AS relatedEntityId, e2.description AS description
+      LIMIT 5
+    `, { entityId });
 
-  return await chatAPI.sendMessages([
-    {
-      content: responseText,
-      role: "system",
-      stage: "Tail Search",
+    if (result.records.length === 0) {
+      return await chatAPI.sendMessages([
+        {
+          content: `${KG_NAME} did not find any entities connected to "${entityId}" via "${relationshipType}" relationship. Are you sure that entity has that relationship?`,
+          role: "system",
+          stage: "Tail Search",
+        } as IntermediateChatMessageType,
+      ]);
     }
-  ])
+
+    const relatedEntitiesText = result.records
+      .map(record => {
+        const relatedEntityId = record.get('relatedEntityId');
+        const description = record.get('description');
+        return `${relatedEntityId}: ${description || 'No description'}`;
+      })
+      .join('\n');
+
+    return await chatAPI.sendMessages([
+      {
+        content: `Related entities via ${relationshipType}:\n${relatedEntitiesText}`,
+        role: "system",
+        stage: "Tail Search",
+      } as IntermediateChatMessageType,
+    ]);
+  } catch (error) {
+    console.error('Error in related entities search:', error);
+    return await chatAPI.sendMessages([
+      {
+        content: `Error finding related entities: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        role: "system",
+        stage: "Tail Search",
+      } as IntermediateChatMessageType,
+    ]);
+  }
 }

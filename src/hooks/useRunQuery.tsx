@@ -6,101 +6,146 @@ import { UseMutateFunction, useMutation } from "@tanstack/react-query";
 
 import { pushQueryHistory, updateLastQueryHistory } from 'redux/queryHistorySlice.ts';
 import { setResults, setResultsSummary } from 'redux/resultsSlice.ts';
-import { useAppDispatch } from "redux/store.ts";
+import { useAppDispatch, useAppSelector } from "redux/store.ts";
 
-import { runQuery as runQueryFunction } from 'utils/knowledgeBase/runQuery.ts';
+import { runCypherQuery, convertToSparqlResultsFormat, formatCypherResult } from 'utils/neo4j/runCypherQuery.ts';
 import { SummarizeOutcomeType, summarizeQueryResults } from 'utils/summarizeQueryResults.ts';
-
-import { SparqlResultsJsonType } from "types/sparql.ts";
 
 import { useGetNewChatId } from "./useGetNewChatId.ts";
 import { useChatAPIInstance } from "./useChatAPIInstance.ts";
 
+type RunQueryContextType = {
+  runQuery: UseMutateFunction<void, Error, string, unknown>;
+  isPending: boolean;
+};
+
 //this sets up a context so we can define one runQuery function for the whole app
-const RunQueryContext = createContext<{
-  runQuery: UseMutateFunction<SparqlResultsJsonType, Error, string, unknown>,
-  runQueryIsPending: boolean,
-  summarizeResultsIsPending: boolean,
-}>({
-  runQuery: async () => {},
-  runQueryIsPending: false,
-  summarizeResultsIsPending: false,
-})
+const RunQueryContext = createContext<RunQueryContextType | null>(null);
 
 //this defines the context provider that should be placed towards the top of the app to make the runQuery function available as a hook
 export function RunQueryProvider({
   children,
-}:{
+}: {
   children: React.ReactNode,
 }) {
-  const dispatch = useAppDispatch()
-
-  const chatAPI = useChatAPIInstance({
-    chatId: 1,
-  })
-  const getNewChatId = useGetNewChatId()
-  const handleSummaryResults = ({name,summary}:{name:string,summary:string}) => {
-    dispatch(updateLastQueryHistory({name, summary}))
-    dispatch(setResultsSummary(summary))
-  }
-  const handleLLMError = (err:Error) => {
-    console.error(err)
-    //TODO should we distringuish between a successful LLM summarization vs an error message?
-    const summary = `There was an error generating a summary: ${err.message}`
-    dispatch(updateLastQueryHistory({name: "Error generating a query name", summary}))
-    dispatch(setResultsSummary(summary))
-  }
-
-  //useMutation for summarizing query results
-  const {isPending: summarizeResultsIsPending, mutate:summarizeResults} = useMutation<void, Error, {query:string, outcome: SummarizeOutcomeType}>({
-    mutationKey: ['summarizeResults'],
-    mutationFn: async ({query,outcome}) => {
-      //try to ask the LLM to give the query a name and summarize the results
-      try {
-        chatAPI.reset(getNewChatId())
-        handleSummaryResults(
-          await summarizeQueryResults(chatAPI, query, outcome)
-        )
-      }
-      catch(llmError) {
-        handleLLMError(llmError as Error)
-      }
-    },
-  })
-
-  //useMutation for running a query
-  const {isPending: runQueryIsPending, mutate:runQuery} = useMutation<SparqlResultsJsonType, Error, string>({
-    mutationKey: ['runQuery'],
-    mutationFn: async (query: string) => {
-      dispatch(setResults(null)) //clear the current results
-      return await runQueryFunction(query) //run the query
-    },
-    onSuccess: async (data, query) => { //the query executed properly
-      dispatch(pushQueryHistory({data, query})) //update the query history
-      dispatch(setResults({data, error: null, summary: null})) //set the results
-      summarizeResults({query, outcome:{data}}) //try to summarize the results
-    },
-    onError: async (error, query) => { //there was an error executing the query
-      console.error(error)
-      dispatch(pushQueryHistory({error: error.message, query})) //update the query history
-      dispatch(setResults({data: null, error: error.message, summary: null})) //show the error
-      summarizeResults({query, outcome:{error}}) //try to explain the error
-    },
-  })
+  const dispatch = useAppDispatch();
+  const getNewChatId = useGetNewChatId();
+  const isConnected = useAppSelector((state) => state.neo4jConnection.connected);
   
-
+  // For summarizing query results
+  const chatAPI = useChatAPIInstance({
+    chatId: getNewChatId(),
+  });
+  
+  const { mutate, isPending } = useMutation({
+    mutationFn: async (query: string) => {
+      if (!isConnected) {
+        throw new Error("Not connected to Neo4j database");
+      }
+      
+      try {
+        // Execute the Cypher query
+        const result = await runCypherQuery(query);
+        const formattedResult = formatCypherResult(result);
+        const sparqlCompatibleFormat = convertToSparqlResultsFormat(formattedResult);
+        
+        // Store the results
+        dispatch(setResults({ 
+          data: sparqlCompatibleFormat, 
+          error: null,
+          summary: null 
+        }));
+        
+        // Add to query history
+        dispatch(pushQueryHistory({ 
+          data: sparqlCompatibleFormat, 
+          query 
+        }));
+        
+        // Summarize the results
+        handleSummaryResults({
+          data: sparqlCompatibleFormat
+        }, query);
+        
+      } catch (error) {
+        console.error("Error executing query:", error);
+        
+        // Store the error
+        dispatch(setResults({ 
+          data: null, 
+          error: error instanceof Error ? error.message : String(error),
+          summary: null 
+        }));
+        
+        // Add to query history with error
+        dispatch(pushQueryHistory({ 
+          error: error instanceof Error ? error.message : String(error), 
+          query 
+        }));
+        
+        // Try to summarize the error
+        handleLLMError(error instanceof Error ? error : new Error(String(error)));
+      }
+    },
+  });
+  
+  const handleSummaryResults = async (
+    outcome: SummarizeOutcomeType,
+    query: string
+  ) => {
+    try {
+      if ('data' in outcome) {
+        const summary = await summarizeQueryResults(chatAPI, query, outcome);
+        
+        // Update the results with the summary
+        dispatch(setResultsSummary(summary));
+        
+        // Update the query history with the name and summary
+        dispatch(updateLastQueryHistory({
+          name: "Query Result",
+          summary: summary
+        }));
+      }
+    } catch (error) {
+      console.error("Error summarizing results:", error);
+    }
+  };
+  
+  const handleLLMError = async (err: Error) => {
+    try {
+      // Send the error to the LLM to get a more user-friendly explanation
+      const response = await chatAPI.sendMessages([
+        {
+          role: "user",
+          content: `The following Cypher query caused an error. Can you explain what went wrong and how to fix it? Error: ${err.message}`,
+          stage: "Query Summarization"
+        }
+      ]);
+      
+      // Update the results with the explanation
+      dispatch(setResultsSummary(response.content));
+      
+      // Update the query history with the name and summary
+      dispatch(updateLastQueryHistory({
+        name: "Error Analysis",
+        summary: response.content
+      }));
+    } catch (error) {
+      console.error("Error getting error explanation:", error);
+    }
+  };
+  
   return (
-    <RunQueryContext.Provider value={{
-      runQuery,
-      runQueryIsPending,
-      summarizeResultsIsPending,
-    }}>
+    <RunQueryContext.Provider value={{ runQuery: mutate, isPending }}>
       {children}
     </RunQueryContext.Provider>
-  )
+  );
 }
 
-//this hook lets any child of the provider access the runQuery function
 export function useRunQuery() {
-  return useContext(RunQueryContext);
+  const context = useContext(RunQueryContext);
+  if (!context) {
+    throw new Error("useRunQuery must be used within a RunQueryProvider");
+  }
+  return context;
 }

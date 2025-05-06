@@ -2,21 +2,22 @@
 // SPDX-License-Identifier: MIT
 import { useDispatch, useSelector } from 'react-redux'
 import { configureStore } from '@reduxjs/toolkit'
-
 import { chatHistorySliceReducer } from './chatHistorySlice'
 import { queryValueReducer } from './queryValueSlice'
 import { resultsReducer } from './resultsSlice'
 import { queryHistoryReducer } from './queryHistorySlice'
 import { settingsReducer } from './settingsSlice'
+import { neo4jConnectionReducer } from './neo4jConnectionSlice'
 
 export const store = configureStore({
   reducer: {
     chatHistory: chatHistorySliceReducer,
-    queryHistory: queryHistoryReducer,
     queryValue: queryValueReducer,
-    settings: settingsReducer,
     results: resultsReducer,
-  }
+    queryHistory: queryHistoryReducer,
+    settings: settingsReducer,
+    neo4jConnection: neo4jConnectionReducer,
+  },
 })
 
 //based on https://redux.js.org/tutorials/typescript-quick-start
@@ -28,6 +29,6 @@ export type AppDispatch = typeof store.dispatch
 
 
 // Use throughout your app instead of plain `useDispatch` and `useSelector`
-export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
-export const useAppSelector = useSelector.withTypes<RootState>()
+export const useAppDispatch = () => useDispatch<AppDispatch>()
+export const useAppSelector = <T>(selector: (state: RootState) => T): T => useSelector<RootState, T>(selector)
 

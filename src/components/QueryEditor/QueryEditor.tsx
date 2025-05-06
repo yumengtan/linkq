@@ -17,10 +17,23 @@ import { useRunQuery } from 'hooks/useRunQuery';
 import styles from "./QueryEditor.module.scss"
 import { LLMWarning } from 'components/LLMWarning';
 
+// Import the exact types from your slices
+type QueryRecordType = {
+  name: string | null,
+  query: string,
+  results: {
+    data: any | null,
+    error: string | null,
+    summary: string | null,
+  },
+}
+
 export function QueryEditor() {
   const dispatch = useAppDispatch()
-  const queryHistory = useAppSelector(state => state.queryHistory.queryHistory)
-  const queryValue = useAppSelector(state => state.queryValue.queryValue)
+  
+  // Access the correct state properties based on your slice files
+  const queryHistory = useAppSelector(state => state.queryHistory.queries || [])
+  const queryValue = useAppSelector(state => state.queryValue.value || '')
 
   const { runQuery } = useRunQuery()
 
@@ -57,7 +70,7 @@ export function QueryEditor() {
                 </LLMWarning>
               </Title>
               <Divider/>
-              {queryHistory.map((record,i) => {
+              {queryHistory.map((record: QueryRecordType, i: number) => {
                 return (
                   <Button key={i} className={styles["query-history-button"]} fullWidth variant='default' onClick={() => {
                     dispatch(setQueryValue(record.query))

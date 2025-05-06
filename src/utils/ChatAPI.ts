@@ -91,7 +91,10 @@ export class ChatAPI {
       //request a response from the LLM
       chatCompletion = await this.openAI.chat.completions.create({
         ...this.chatCompletionCreateOptions,
-        messages: this.messages, //send the entire message history
+        messages: this.messages.map(msg => {
+          const { chatId, name, stage, ...openAIMsg } = msg;
+          return openAIMsg as ChatCompletionMessageParam;
+        }),
       });
     }
     catch(err) {

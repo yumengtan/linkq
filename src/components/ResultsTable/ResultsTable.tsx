@@ -4,7 +4,7 @@
 import { SparqlBindingType, SparqlValueObjectType, SparqlResultsJsonType } from "types/sparql";
 import { useReactTable, flexRender, createColumnHelper, getCoreRowModel } from "@tanstack/react-table"
 import { downloadJson } from "utils/downloadJson";
-import { formatURI, getHrefFromURI } from "utils/knowledgeBase/formatURI";
+import { formatURI, getHrefFromURI } from "utils/neo4j/formatURI";
 
 import { ActionIcon, Table } from '@mantine/core';
 import { IconDownload } from '@tabler/icons-react';

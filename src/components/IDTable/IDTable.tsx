@@ -3,98 +3,147 @@
 
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { Table, Title } from "@mantine/core";
-
 import { InfoModal } from "components/InfoModal";
-
 import { useAppSelector } from "redux/store";
+import { useEffect, useState } from "react";
+import styles from "./IDTable.module.scss";
 
-import { IDTableEntitiesType } from "types/idTable";
+// Define IDTableEntitiesType here if it can't be found:
+export type IDTableEntitiesType = {
+  id: string;
+  label: string;
+  description?: string;
+  properties?: Record<string, any>;
+};
 
-import { useQueryGetIDTableEntitiesFromQuery } from "utils/knowledgeBase/getEntityData";
+export function IDTableContainer() {
+  const [nodeProperties, setNodeProperties] = useState<IDTableEntitiesType[]>([]);
+  // Fix property access - make sure this matches your state structure
+  const query = useAppSelector((state) => state.queryValue.value || "");
+  const isConnected = useAppSelector((state) => state.neo4jConnection.connected);
 
-import styles from "./IDTable.module.scss"
+  useEffect(() => {
+    const extractNodesFromQuery = async () => {
+      if (!query || !isConnected) {
+        setNodeProperties([]);
+        return;
+      }
 
-export function IDTableContainer () {
-    const queryValue = useAppSelector(state => state.queryValue.queryValue)
+      try {
+        // Extract node labels and ids from the query using a pattern matching approach
+        const nodePattern = /\b([a-zA-Z_]\w*):([a-zA-Z_]\w*)\b/g;
+        const matches = [...query.matchAll(nodePattern)];
+        
+        if (matches.length === 0) return;
 
-    const {data, error, isLoading} = useQueryGetIDTableEntitiesFromQuery(queryValue);
-
-    if(!isLoading && !error && !data) {
-        return null
-    }
-
-    const content = (() => {
-        if(isLoading) {
-            return <p>Loading...</p>
+        // Get unique node variables
+        const nodeVariables = Array.from(new Set(matches.map(match => match[1])));
+        
+        // Get properties for each node
+        const nodesWithProperties: IDTableEntitiesType[] = [];
+        
+        for (const nodeVar of nodeVariables) {
+          const nodeLabels = matches
+            .filter(match => match[1] === nodeVar)
+            .map(match => match[2]);
+          
+          if (nodeLabels.length > 0) {
+            nodesWithProperties.push({
+              id: nodeVar,
+              label: nodeLabels.join(':'),
+              description: `Node variable: ${nodeVar}`
+            });
+          }
         }
-        else if(error) {
-            return <p>Error: {error.message}</p>
-        }
-        else if(data) {
-            return <IDTable data={data}/>
-        }
-        else {
-            return <p>No ID data</p>
-        }
-    })()
+        
+        setNodeProperties(nodesWithProperties);
+      } catch (error) {
+        console.error("Error extracting nodes from query:", error);
+        setNodeProperties([]);
+      }
+    };
 
-    return (
-        <div id={styles["id-table-container"]}>
-            <Title order={4}>
-                Entity-Relation Table from KG
-                <InfoModal title="Entity-Relation Table from KG">
-                    <p>This table extracts the IDs from your query and explains what they mean in the KG.</p>
-                </InfoModal>
-            </Title>
-            {content}
-        </div>
-    )
+    extractNodesFromQuery();
+  }, [query, isConnected]);
+
+  // Use the NodeTable component to display the extracted nodes
+  return (
+    <div id={styles["id-table-container"]}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+        <Title order={3} size="h6">Node Variables</Title>
+        <InfoModal title="Node Variables">
+          <p>
+            This table shows the node variables used in your Cypher query.
+            Each row represents a variable in your query with its associated label.
+          </p>
+        </InfoModal>
+      </div>
+      
+      <NodeTable data={nodeProperties} />
+    </div>
+  );
 }
 
-function IDTable({data}:{data: IDTableEntitiesType[]}) {
-    const columnHelper = createColumnHelper<IDTableEntitiesType>()
+// Create a separate NodeTable component
+function NodeTable({data}: {data: IDTableEntitiesType[]}) {
+  const columnHelper = createColumnHelper<IDTableEntitiesType>();
+  
+  const columns = [
+    columnHelper.accessor('id', {
+      header: 'ID',
+      cell: info => info.getValue(),
+    }),
+    columnHelper.accessor('label', {
+      header: 'Label',
+      cell: info => info.getValue(),
+    }),
+    columnHelper.accessor('description', {
+      header: 'Description',
+      cell: info => info.getValue() || '',
+    }),
+  ];
 
-    const columns = [
-        columnHelper.accessor("id",{}),
-        columnHelper.accessor("label",{}),
-        columnHelper.accessor("description",{}),
-    ]
+  const table = useReactTable({
+    data,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  });
 
-    const table = useReactTable({
-        columns,
-        data: data,
-        getCoreRowModel: getCoreRowModel(),
-    })
-
-    return (
+  return (
+    <>
+      {data.length > 0 ? (
         <Table>
-            <Table.Thead>
-                {table.getHeaderGroups().map(headerGroup => (
-                    <Table.Tr key={headerGroup.id}>
-                    {headerGroup.headers.map(header => (
-                        <Table.Th key={header.id}>
-                        {header.isPlaceholder
-                            ? null
-                            : flexRender(
-                                header.column.columnDef.header,
-                                header.getContext()
-                            )}
-                        </Table.Th>
-                    ))}
-                    </Table.Tr>
+          <thead>
+            {table.getHeaderGroups().map(headerGroup => (
+              <tr key={headerGroup.id}>
+                {headerGroup.headers.map(header => (
+                  <th key={header.id}>
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(
+                          header.column.columnDef.header,
+                          header.getContext()
+                        )}
+                  </th>
                 ))}
-                </Table.Thead>
-                <Table.Tbody>
-                {table.getRowModel().rows.map(row => (
-                    <Table.Tr key={row.id}>
-                    {row.getVisibleCells().map(cell => (
-                        <Table.Td key={cell.id}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                        </Table.Td>
-                    ))}
-                    </Table.Tr>
+              </tr>
+            ))}
+          </thead>
+          <tbody>
+            {table.getRowModel().rows.map(row => (
+              <tr key={row.id}>
+                {row.getVisibleCells().map(cell => (
+                  <td key={cell.id}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </td>
                 ))}
-            </Table.Tbody>
+              </tr>
+            ))}
+          </tbody>
         </Table>
-    )
+      ) : (
+        <p>No node variables detected in the current query.</p>
+      )}
+    </>
+  );
 }
